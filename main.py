@@ -240,7 +240,13 @@ async def handle_format_callback(client, callback_query: CallbackQuery):
                 'preferredcodec': 'mp3',
                 'preferredquality': '192',
             }]
-            ydl_opts['ffmpeg_location'] = os.getcwd() + '/ffmpeg'
+            
+            # Check for local ffmpeg (development) or use system default (production/docker)
+            local_ffmpeg = os.path.join(os.getcwd(), 'ffmpeg')
+            if os.path.exists(local_ffmpeg):
+                ydl_opts['ffmpeg_location'] = local_ffmpeg
+            # else: yt-dlp automatically finds it in PATH
+            
         elif format_type == "fmt_360":
             ydl_opts['format'] = 'best[height<=360]'
         elif format_type == "fmt_720":
