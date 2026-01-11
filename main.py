@@ -20,14 +20,40 @@ logger = logging.getLogger(__name__)
 API_ID = 34373587
 API_HASH = "b023ab5ca734ae960daa33fcf791230c"
 BOT_TOKEN = "8420666514:AAF7h5ZsQZvGRwkWmnOJOXKNHTr7YC8P5KQ"
+ADMINS = [1032563269] # User provided ID
 
 app = Client("my_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 # User Data
 user_downloads = {} # chat_id -> url
 user_languages = {} # chat_id -> 'en' | 'ru' | 'uz'
+USERS_FILE = "users.txt"
 
-# Language Strings
+def save_user(chat_id):
+    if not os.path.exists(USERS_FILE):
+        with open(USERS_FILE, "w") as f:
+            pass
+    
+    with open(USERS_FILE, "r") as f:
+        users = f.read().splitlines()
+    
+    if str(chat_id) not in users:
+        with open(USERS_FILE, "a") as f:
+            f.write(f"{chat_id}\n")
+
+def get_users_count():
+    if not os.path.exists(USERS_FILE):
+        return 0
+    with open(USERS_FILE, "r") as f:
+        return len(f.read().splitlines())
+
+def get_all_users():
+    if not os.path.exists(USERS_FILE):
+        return []
+    with open(USERS_FILE, "r") as f:
+        return f.read().splitlines()
+
+# Language Strings (kept as is...)
 LANG_STRINGS = {
     'en': {
         'welcome': "Welcome! Send me a YouTube link.",
@@ -129,8 +155,37 @@ def get_size_string(size):
         size /= 1024.0
     return f"{size:.2f} PB"
 
+@app.on_message(filters.command("stats") & filters.user(ADMINS))
+async def stats(client, message):
+    count = get_users_count()
+    await message.reply_text(f"📊 Jami foydalanuvchilar: {count} ta")
+
+@app.on_message(filters.command("broadcast") & filters.user(ADMINS))
+async def broadcast(client, message):
+    if not message.reply_to_message:
+         await message.reply_text("Xabarni forward qiling yoki yozib, unga reply qilib /broadcast bosing.")
+         return
+    
+    msg = message.reply_to_message
+    users = get_all_users()
+    sent = 0
+    failed = 0
+    
+    status_msg = await message.reply_text("Xabar yuborilmoqda...")
+    
+    for chat_id in users:
+        try:
+            await msg.copy(int(chat_id))
+            sent += 1
+        except Exception:
+            failed += 1
+        await asyncio.sleep(0.05) # Prevent flood
+        
+    await status_msg.edit_text(f"✅ Yuborildi: {sent}\n❌ Yuborilmadi: {failed}")
+
 @app.on_message(filters.command("start"))
 async def start(client, message):
+    save_user(message.chat.id)
     # Always ask for language on start
     buttons = [
         [InlineKeyboardButton("🇺🇸 English", callback_data="lang_en")],
