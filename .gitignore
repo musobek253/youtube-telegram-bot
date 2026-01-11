@@ -1,0 +1,13 @@
+venv/
+__pycache__/
+*.pyc
+downloads/
+ffmpeg
+ffmpeg.zip
+session.session
+session.session-journal
+*.mp4
+*.mp3
+*.m4a
+*.webm
+ffmpeg
