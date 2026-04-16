@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: engliz_db
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: strong_password  # Bu parolni o'zgartirishingiz mumkin
+      POSTGRES_DB: telegram_engliz
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  bot:
+    build: .
+    container_name: engliz_bot
+    restart: always
+    depends_on:
+      - db
+    env_file:
+      - .env
+    volumes:
+      - ./bot/audio:/app/bot/audio   # Audio fayllar ochib ketmasligi va zaxira uchun
+
+volumes:
+  postgres_data:
