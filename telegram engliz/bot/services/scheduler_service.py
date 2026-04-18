@@ -4,9 +4,11 @@ APScheduler — kundalik 07:00 da so'z jo'natish va quiz tekshirish.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.date import DateTrigger
 
 from bot.config import SEND_HOUR, SEND_MINUTE, TIMEZONE, WORDS_PER_DAY
 from bot.database import models as db
@@ -81,6 +83,30 @@ async def _send_voice_safe(bot, chat_id: int, file_path: str | None, caption: st
         logger.warning("Audio yuborishda xato (chat=%d): %s", chat_id, err)
 
 
+# ─────────────────── Qayta urinish funksiyasi ──────────────────
+
+async def retry_prepare_and_send(bot) -> None:
+    """
+    Agar so'z olinmay qolsa, 10 daqiqadan keyin ishga tushadigan funksiya.
+    """
+    global _scheduler
+    logger.info("=== Qayta urinish: So'zlarni tayyorlash va jo'natish ===")
+    words = await prepare_daily_words()
+    
+    if words:
+        await send_daily_words(bot)
+    else:
+        logger.error("Qayta urinishda ham so'z olib bo'lmadi! 10 daqiqadan so'ng yana urinib ko'ramiz.")
+        if _scheduler:
+            run_date = datetime.now() + timedelta(minutes=10)
+            _scheduler.add_job(
+                retry_prepare_and_send,
+                trigger=DateTrigger(run_date=run_date, timezone=TIMEZONE),
+                args=[bot],
+                name="Retry prepare and send",
+                misfire_grace_time=60,
+            )
+
 # ─────────────────── Jo'natish (07:00) ──────────────────
 
 async def send_daily_words(bot) -> None:
@@ -92,86 +118,116 @@ async def send_daily_words(bot) -> None:
 
     words = await db.get_latest_words(limit=WORDS_PER_DAY)
     if not words:
-        logger.error("Jo'natilajak so'zlar topilmadi!")
-        return
+        logger.error("Jo'natilajak so'zlar topilmadi, biroq qayta urinish ishga tushishi mumkin.")
 
     users = await db.get_all_active_users()
+    if not users:
+        logger.info("Aktiv foydalanuvchilar yo'q, jo'natish to'xtatildi.")
+        return
+
     logger.info("%d ta aktiv foydalanuvchi topildi.", len(users))
+    sent_any = False
 
-    for user in users:
-        try:
-            telegram_id = user["telegram_id"]
-            user_db_id = user["id"]
-            cycle = await db.get_user_current_cycle(user_db_id)
+    if words:
+        for user in users:
+            try:
+                telegram_id = user["telegram_id"]
+                user_db_id = user["id"]
+                cycle = await db.get_user_current_cycle(user_db_id)
 
-            # Header
-            await bot.send_message(
-                telegram_id,
-                format_daily_header(),
-                parse_mode="HTML",
-            )
+                # Shu siklda foydalanuvchiga jo'natib bo'lingan so'zlarni olamiz
+                sent_word_ids = await db.get_user_cycle_words(user_db_id, cycle)
+                
+                # Faqat jo'natilmagan so'zlarni ajratib olamiz
+                words_to_send = [w for w in words if w["id"] not in sent_word_ids]
+                
+                if not words_to_send:
+                    logger.info("User=%d ga barcha so'nggi so'zlar oldin jo'natilgan, o'tkazib yuborilmoqda.", telegram_id)
+                    continue
 
-            # Har bir so'z
-            for i, word in enumerate(words, start=1):
-                text = format_daily_word(word, i, len(words))
-                await bot.send_message(telegram_id, text, parse_mode="HTML")
+                sent_any = True
 
-                paths = word.get("audio_paths", {})
-
-                # ── So'z ovozi: avval inglizcha, keyin ruscha ──
-                await _send_voice_safe(
-                    bot, telegram_id,
-                    paths.get("word_en") or word.get("audio_path"),
-                    caption=f"🇬🇧 <b>{word['english'].upper()}</b> — inglizcha talaffuz",
-                )
-                await _send_voice_safe(
-                    bot, telegram_id,
-                    paths.get("word_ru"),
-                    caption=f"🇷🇺 <b>{word['russian']}</b> — ruscha talaffuz",
+                # Header
+                await bot.send_message(
+                    telegram_id,
+                    format_daily_header(),
+                    parse_mode="HTML",
                 )
 
-                # ── 1-gap ovozi: avval inglizcha, keyin ruscha ──
-                await _send_voice_safe(
-                    bot, telegram_id,
-                    paths.get("sentence_1_en"),
-                    caption=f"🇬🇧 1️⃣ <i>{word['sentence_en_1']}</i>",
+                # Har bir so'z
+                for i, word in enumerate(words_to_send, start=1):
+                    text = format_daily_word(word, i, len(words_to_send))
+                    await bot.send_message(telegram_id, text, parse_mode="HTML")
+
+                    paths = word.get("audio_paths", {})
+
+                    # ── So'z ovozi: avval inglizcha, keyin ruscha ──
+                    await _send_voice_safe(
+                        bot, telegram_id,
+                        paths.get("word_en") or word.get("audio_path"),
+                        caption=f"🇬🇧 <b>{word['english'].upper()}</b> — inglizcha talaffuz",
+                    )
+                    await _send_voice_safe(
+                        bot, telegram_id,
+                        paths.get("word_ru"),
+                        caption=f"🇷🇺 <b>{word['russian']}</b> — ruscha talaffuz",
+                    )
+
+                    # ── 1-gap ovozi: avval inglizcha, keyin ruscha ──
+                    await _send_voice_safe(
+                        bot, telegram_id,
+                        paths.get("sentence_1_en"),
+                        caption=f"🇬🇧 1️⃣ <i>{word['sentence_en_1']}</i>",
+                    )
+                    await _send_voice_safe(
+                        bot, telegram_id,
+                        paths.get("sentence_1_ru"),
+                        caption=f"🇷🇺 1️⃣ <i>{word['sentence_ru_1']}</i>",
+                    )
+
+                    # ── 2-gap ovozi: avval inglizcha, keyin ruscha ──
+                    await _send_voice_safe(
+                        bot, telegram_id,
+                        paths.get("sentence_2_en"),
+                        caption=f"🇬🇧 2️⃣ <i>{word['sentence_en_2']}</i>",
+                    )
+                    await _send_voice_safe(
+                        bot, telegram_id,
+                        paths.get("sentence_2_ru"),
+                        caption=f"🇷🇺 2️⃣ <i>{word['sentence_ru_2']}</i>",
+                    )
+
+                    # user_words ga belgilash
+                    await db.mark_word_sent(user_db_id, word["id"], cycle)
+
+                # Footer
+                total_learned = len(await db.get_user_cycle_words(user_db_id, cycle))
+                await bot.send_message(
+                    telegram_id,
+                    format_daily_footer(cycle, total_learned),
+                    parse_mode="HTML",
                 )
-                await _send_voice_safe(
-                    bot, telegram_id,
-                    paths.get("sentence_1_ru"),
-                    caption=f"🇷🇺 1️⃣ <i>{word['sentence_ru_1']}</i>",
-                )
 
-                # ── 2-gap ovozi: avval inglizcha, keyin ruscha ──
-                await _send_voice_safe(
-                    bot, telegram_id,
-                    paths.get("sentence_2_en"),
-                    caption=f"🇬🇧 2️⃣ <i>{word['sentence_en_2']}</i>",
-                )
-                await _send_voice_safe(
-                    bot, telegram_id,
-                    paths.get("sentence_2_ru"),
-                    caption=f"🇷🇺 2️⃣ <i>{word['sentence_ru_2']}</i>",
-                )
+                logger.info("✅ user=%d ga jo'natildi.", telegram_id)
 
-                # user_words ga belgilash
-                await db.mark_word_sent(user_db_id, word["id"], cycle)
-
-            # Footer
-            total_learned = len(await db.get_user_cycle_words(user_db_id, cycle))
-            await bot.send_message(
-                telegram_id,
-                format_daily_footer(cycle, total_learned),
-                parse_mode="HTML",
-            )
-
-            logger.info("✅ user=%d ga jo'natildi.", telegram_id)
-
-        except Exception as e:
-            logger.error("❌ user=%d ga jo'natishda xato: %s", user.get("telegram_id"), e)
+            except Exception as e:
+                logger.error("❌ user=%d ga jo'natishda xato: %s", user.get("telegram_id"), e)
 
     logger.info("=== Jo'natish tugadi ===")
 
+    # Agar hech kimga yangi so'z jo'natilmagan bo'lsa (yoki yangi so'z yo'qligidan), retry qilamiz
+    if not sent_any:
+        global _scheduler
+        logger.error("Hech kimga yangi bugungi so'z jo'natilmadi. Gemini xatosi bo'lishi mumkin. 10 daqiqadan so'ng qayta uriniladi.")
+        if _scheduler:
+            run_date = datetime.now() + timedelta(minutes=10)
+            _scheduler.add_job(
+                retry_prepare_and_send,
+                trigger=DateTrigger(run_date=run_date, timezone=TIMEZONE),
+                args=[bot],
+                name="Retry prepare and send (Initial fallback)",
+                misfire_grace_time=60,
+            )
 
 # ─────────────────── Quiz tekshirish (07:01) ──────────────────
 
